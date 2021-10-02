@@ -51,6 +51,7 @@ from homeassistant.util.yaml.loader import JSON_TYPE
 if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
     from homeassistant.helpers.entity_platform import EntityPlatform
+    from homeassistant.helpers.service_platform import PlatformService, ServicePlatform
 
 
 CONF_SERVICE_ENTITY_ID = "entity_id"
@@ -699,6 +700,58 @@ async def _handle_entity_call(
             "Service %s for %s incorrectly returns a coroutine object. Await result instead in service handler. Report bug to integration author",
             func,
             entity.entity_id,
+        )
+        await result  # type: ignore
+
+
+async def integration_service_call(
+    hass: HomeAssistant,
+    platforms: Iterable[ServicePlatform],
+    call: ServiceCall,
+) -> None:
+    """Handle an integration service call.
+
+    Calls all platforms simultaneously.
+    """
+    # A list with platform services to call the service on.
+    services: list[PlatformService] = [
+        service for platform in platforms for service in platform.services.values()
+    ]
+
+    if not services:
+        return
+
+    done, pending = await asyncio.wait(
+        [
+            asyncio.create_task(
+                service.async_request_call(_handle_service_call(hass, service, call))
+            )
+            for service in services
+        ]
+    )
+    assert not pending
+    for future in done:
+        future.result()  # pop exception if have
+
+
+async def _handle_service_call(
+    hass: HomeAssistant,
+    service: PlatformService,
+    service_call: ServiceCall,
+) -> None:
+    """Handle calling service method."""
+    result = hass.async_run_job(service.async_handle_service, service_call)
+
+    # Guard because callback functions do not return a task when passed to async_run_job.
+    if result is not None:
+        await result
+
+    if asyncio.iscoroutine(result):
+        _LOGGER.error(
+            "Service %s for %s incorrectly returns a coroutine object. "
+            "Await result instead in service handler. Report bug to integration author",
+            service.async_handle_service,
+            service.service_name,
         )
         await result  # type: ignore
 
